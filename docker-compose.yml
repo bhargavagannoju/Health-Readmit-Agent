@@ -1,0 +1,171 @@
+# Docker Compose Configuration for Healthcare AI Systems
+
+version: '3.8'
+
+services:
+  # FastAPI Backend
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: healthcare-ai-api
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://postgres:password@db:5432/healthcare_ai
+      - REDIS_URL=redis://cache:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - db
+      - cache
+    volumes:
+      - ./problem_1_ml_readmission:/app/problem_1_ml_readmission
+      - ./problem_2_llm_note_extraction:/app/problem_2_llm_note_extraction
+      - ./problem_3_agentic_system:/app/problem_3_agentic_system
+      - ./ui/backend:/app/ui/backend
+    command: uvicorn ui.backend.app:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - healthcare-ai
+
+  # PostgreSQL Database (for audit logs)
+  db:
+    image: postgres:15-alpine
+    container_name: healthcare-ai-postgres
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=healthcare_ai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - healthcare-ai
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  cache:
+    image: redis:7-alpine
+    container_name: healthcare-ai-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - healthcare-ai
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ML Model Service (TensorFlow Serving)
+  ml-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ml
+    container_name: healthcare-ai-ml
+    ports:
+      - "8501:8501"  # gRPC
+      - "8500:8500"  # REST
+    environment:
+      - MODEL_NAME=readmission_risk
+      - MODEL_PATH=/models
+    volumes:
+      - ./problem_1_ml_readmission/outputs/models:/models
+    networks:
+      - healthcare-ai
+
+  # LLM Service (LangChain + API wrapper)
+  llm-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.llm
+    container_name: healthcare-ai-llm
+    ports:
+      - "8002:8002"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - ./problem_2_llm_note_extraction:/app/extractors
+    networks:
+      - healthcare-ai
+
+  # Frontend (React/Next.js)
+  frontend:
+    build:
+      context: ./ui/frontend
+      dockerfile: Dockerfile
+    container_name: healthcare-ai-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    depends_on:
+      - api
+    volumes:
+      - ./ui/frontend/src:/app/src
+    networks:
+      - healthcare-ai
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: healthcare-ai-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+      - frontend
+    networks:
+      - healthcare-ai
+
+  # Monitoring (Prometheus)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: healthcare-ai-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - healthcare-ai
+
+  # Monitoring (Grafana)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: healthcare-ai-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    depends_on:
+      - prometheus
+    networks:
+      - healthcare-ai
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  healthcare-ai:
+    driver: bridge
